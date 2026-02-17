@@ -1,0 +1,1928 @@
+{
+  "name": "B2G Complete System – SAM → Vendors → Matching → CRM",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "cron-main",
+      "name": "⏰ Every 6 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        400
+      ],
+      "notes": "MODULE 1: SAM Sentinel - Opportunity Ingestion"
+    },
+    {
+      "parameters": {
+        "jsCode": "return {json: {page: 1, hasMorePages: true, allOpportunities: [], totalFetched: 0, errors: []}};"
+      },
+      "id": "init-pagination",
+      "name": "🔄 Init Pagination",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.sam.gov/opportunities/v2/search",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "api_key",
+              "value": "={{$env.SAM_API_KEY}}"
+            },
+            {
+              "name": "postedFrom",
+              "value": "={{$now.minus({ hours: 6 }).toISO()}}"
+            },
+            {
+              "name": "type",
+              "value": "o"
+            },
+            {
+              "name": "ptype",
+              "value": "Solicitation"
+            },
+            {
+              "name": "naics",
+              "value": "={{ ($json.naics_codes || ['541512','541519']).join(',') }}"
+            },
+            {
+              "name": "setAside",
+              "value": "SB,8A,SDVOSB,WOSB"
+            },
+            {
+              "name": "responseDeadLineFrom",
+              "value": "={{$now.toISO()}}"
+            },
+            {
+              "name": "limit",
+              "value": "100"
+            },
+            {
+              "name": "offset",
+              "value": "={{ ($('🔄 Init Pagination').item.json.page - 1) * 100 }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "retry": {
+            "retry": {
+              "maxRetries": 3,
+              "retryOnHttpStatusCode": "429,500,502,503,504",
+              "waitBetweenTries": 5000
+            }
+          }
+        }
+      },
+      "id": "sam-api",
+      "name": "📡 SAM.gov API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        680,
+        400
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.item.json;\nconst pagination = $('🔄 Init Pagination').item.json;\nif (response.error || !response.opportunitiesData) {\n  return {json: {...pagination, hasMorePages: false, errors: [...pagination.errors, {message: response.error || 'No data', page: pagination.page}]}};\n}\nconst opps = response.opportunitiesData || [];\nconst all = [...pagination.allOpportunities, ...opps];\nconst hasMore = all.length < (response.totalRecords || 0) && opps.length === 100 && pagination.page < 10;\nreturn {json: {page: pagination.page + 1, hasMorePages: hasMore, allOpportunities: all, totalFetched: all.length, totalRecords: response.totalRecords || 0, errors: pagination.errors}};"
+      },
+      "id": "check-pagination",
+      "name": "🔍 Check Pagination",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-more",
+              "leftValue": "={{ $json.hasMorePages }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-more-pages",
+      "name": "📄 More Pages?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const state = $input.item.json;\nconst opps = state.allOpportunities || [];\nif (!opps.length) return [{json: {message: 'No opportunities', count: 0, errors: state.errors}}];\nreturn opps.map(o => ({json: o}));"
+      },
+      "id": "extract-opps",
+      "name": "📦 Extract All Opps",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "split-opps",
+      "name": "🔄 Split Opps",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        1560,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "value",
+              "leftValue": "={{ $json.award?.amount || $json.estimatedDollarValue || 0 }}",
+              "rightValue": 25000,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            },
+            {
+              "id": "deadline",
+              "leftValue": "={{ new Date($json.responseDeadLine || $json.responseDeadline) }}",
+              "rightValue": "={{ $now.plus({ days: 14 }).toJSDate() }}",
+              "operator": {
+                "type": "dateTime",
+                "operation": "afterOrEquals"
+              }
+            },
+            {
+              "id": "state",
+              "leftValue": "={{ $json.placeOfPerformance?.state?.code || $json.placeOfPerformance?.state || '' }}",
+              "rightValue": "TX,FL,CA,NY",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            },
+            {
+              "id": "active",
+              "leftValue": "={{ $json.active !== false }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "hard-filter",
+      "name": "🎯 Hard Filter",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableId": "opportunities",
+        "filterType": "manual",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "notice_id",
+              "keyValue": "={{ $json.noticeId }}"
+            }
+          ]
+        }
+      },
+      "id": "check-dup",
+      "name": "🔍 Check Dup",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        2000,
+        240
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "supabase-main",
+          "name": "Supabase"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "new",
+              "leftValue": "={{ $json.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "is-new",
+      "name": "✅ New?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2220,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const opp = $('🔄 Split Opps').item.json;\nreturn {json: {noticeId: opp.noticeId, title: opp.title, description: opp.description || '', naicsCode: opp.naicsCode, type: opp.type, estimatedValue: opp.award?.amount || opp.estimatedDollarValue || 0, state: opp.placeOfPerformance?.state?.code || opp.placeOfPerformance?.state || '', city: opp.placeOfPerformance?.city?.name || '', deadline: opp.responseDeadLine || opp.responseDeadline, fullRecord: opp}};"
+      },
+      "id": "prep-ai",
+      "name": "🔧 Prep AI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2440,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.OPENAI_API_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "gpt-4o-mini"
+            },
+            {
+              "name": "messages",
+              "value": "[{\"role\":\"system\",\"content\":\"Government contract analyst. Return ONLY JSON: {\\\"service_tags\\\":[\\\"tag1\\\"],\\\"complexity_score\\\":3,\\\"contractor_type\\\":\\\"IT\\\",\\\"risk_flags\\\":[]}\"}  , {\"role\":\"user\",\"content\":\"Title: {{$json.title}}\\nNAICS: {{$json.naicsCode}}\\nDesc: {{$json.description}}\\nValue: ${{$json.estimatedValue}}\\nLocation: {{$json.city}}, {{$json.state}}\"}]"
+            },
+            {
+              "name": "temperature",
+              "value": 0.3
+            },
+            {
+              "name": "max_tokens",
+              "value": 500
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "redirect": "follow"
+        }
+      },
+      "id": "ai-enrich",
+      "name": "🤖 AI Enrich",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2660,
+        160
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const ai = $input.item.json.message?.content || $input.item.json.text || '';\nconst opp = $('🔄 Split Opps').item.json;\nconst prep = $('🔧 Prep AI').item.json;\nlet aiData;\ntry{const clean = ai.replace(/```json\\n?/g,'').replace(/```\\n?/g,'').trim();aiData=JSON.parse(clean);}catch(e){aiData={service_tags:[],required_capabilities:[],complexity_score:null,contractor_type:'Unknown',risk_flags:['AI_PARSE_ERROR']};}\nconst est = prep.estimatedValue;\nconst dl = new Date(prep.deadline);\nconst days = Math.max(0,Math.ceil((dl-new Date())/(1000*60*60*24)));\nlet vScore=10;if(est>=250000)vScore=40;else if(est>=100000)vScore=30;else if(est>=50000)vScore=20;\nconst cScore=aiData.complexity_score!==null?(6-aiData.complexity_score)*6:15;\nconst dScore=Math.min(30,Math.max(0,30-Math.floor(days/7)*5));\nconst pScore=vScore+cScore+dScore;\nlet pFlag='STANDARD';if(aiData.complexity_score!==null){if(aiData.complexity_score<=2)pFlag='FAST_TRACK';else if(aiData.complexity_score>=4)pFlag='REVIEW_REQUIRED';}\nreturn {json:{notice_id:opp.noticeId,title:opp.title,agency:opp.department||opp.fullParentPathName||'',naics:opp.naicsCode,state:prep.state,city:prep.city,estimated_value:prep.estimatedValue,deadline:prep.deadline,days_until_deadline:days,raw_json:opp,service_tags:aiData.service_tags||[],required_capabilities:aiData.required_capabilities||[],complexity_score:aiData.complexity_score,contractor_type:aiData.contractor_type||'Unknown',risk_flags:aiData.risk_flags||[],priority_flag:pFlag,priority_score:pScore,ai_parse_error:aiData.risk_flags?.includes('AI_PARSE_ERROR')||false,created_at:new Date().toISOString()}};"
+      },
+      "id": "parse-ai",
+      "name": "⚙️ Parse AI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2880,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "tableId": "opportunities",
+        "dataToSend": "autoMapInputData"
+      },
+      "id": "insert-opp",
+      "name": "💾 Insert Opp",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        3100,
+        160
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "supabase-main",
+          "name": "Supabase"
+        }
+      },
+      "continueOnFail": true,
+      "notes": "MODULE 2: Vendor Discovery - SAM + Google Places"
+    },
+    {
+      "parameters": {
+        "jsCode": "const opp = $input.item.json;\nconst tag = (opp.service_tags && opp.service_tags[0]) || opp.contractor_type || 'General';\nreturn {json: {opportunity_id: opp.notice_id, primary_tag: tag, state: opp.state, city: opp.city, naics: opp.naics, opp_data: opp}};"
+      },
+      "id": "prep-vendor",
+      "name": "🔧 Prep Vendor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3320,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.sam.gov/entity-information/v3/entities",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "api_key",
+              "value": "={{$env.SAM_API_KEY}}"
+            },
+            {
+              "name": "primaryNaics",
+              "value": "={{ $json.naics }}"
+            },
+            {
+              "name": "physicalAddressStateOrProvinceCode",
+              "value": "={{ $json.state }}"
+            },
+            {
+              "name": "registrationStatus",
+              "value": "A"
+            },
+            {
+              "name": "includeSections",
+              "value": "entityRegistration,coreData"
+            },
+            {
+              "name": "page",
+              "value": "0"
+            },
+            {
+              "name": "size",
+              "value": "25"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "retry": {
+            "retry": {
+              "maxRetries": 3,
+              "waitBetweenTries": 5000
+            }
+          }
+        }
+      },
+      "id": "sam-vendor",
+      "name": "🏛️ SAM Vendors",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3540,
+        160
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $input.item.json;\nconst t = $('🔧 Prep Vendor').item.json;\nconst e = r.entityData || [];\nconst vendorCount = e.length;\nconst vendors = e.map(ent=>{const reg=ent.entityRegistration||{};const core=ent.coreData||{};const addr=core.physicalAddress||{};return{json:{source:'SAM_VENDOR',opportunity_id:t.opportunity_id,uei:core.ueiSAM||reg.ueiSAM,cage_code:core.cageCode,name:reg.legalBusinessName||core.entityInformation?.entityName,dba_name:reg.dbaName,address:`${addr.addressLine1||''} ${addr.addressLine2||''}`.trim(),city:addr.city,state:addr.stateOrProvinceCode,zip:addr.zipCode,primary_naics:reg.primaryNaics,registration_date:reg.registrationDate,expiration_date:reg.expirationDate,sam_registered:true,business_types:reg.businessTypes||[],primary_tag:t.primary_tag,readiness_score:100,readiness_reasoning:'SAM.gov registered - auto-qualified'}};});\nreturn [{json:{vendorCount, needsGoogle: vendorCount < 5, opp_id: t.opportunity_id, vendors, opp_data: t.opp_data}}];"
+      },
+      "id": "parse-sam-vendors",
+      "name": "📋 Parse SAM",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3760,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "need-google",
+              "leftValue": "={{ $json.needsGoogle }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-need-google",
+      "name": "🔍 Need Google?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3980,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.item.json;\nconst opp = data.opp_data;\nconst searchQuery = `${opp.contractor_type || opp.primary_tag} contractor in ${opp.city}, ${opp.state}`;\nreturn {json: {searchQuery, opp_id: data.opp_id, opp_data: data.opp_data, samVendors: data.vendors}};"
+      },
+      "id": "prep-google",
+      "name": "🔧 Prep Google",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4200,
+        80
+      ],
+      "notes": "Google Places Search if <5 SAM vendors"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://places.googleapis.com/v1/places:searchText",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Goog-Api-Key",
+              "value": "={{$env.GOOGLE_PLACES_API_KEY}}"
+            },
+            {
+              "name": "X-Goog-FieldMask",
+              "value": "places.id,places.displayName,places.formattedAddress,places.businessStatus,places.types"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "textQuery",
+              "value": "={{ $json.searchQuery }}"
+            },
+            {
+              "name": "maxResultCount",
+              "value": 10
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "retry": {
+            "retry": {
+              "maxRetries": 3,
+              "waitBetweenTries": 5000
+            }
+          }
+        }
+      },
+      "id": "google-search",
+      "name": "🌐 Google Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4420,
+        80
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.item.json;\nconst prep = $('🔧 Prep Google').item.json;\nconst places = response.places || [];\nif (!places.length) return [{json: {message: 'No Google Places found', samVendors: prep.samVendors}}];\nreturn places.map(p => ({json: {place_id: p.id, name: p.displayName?.text || '', address: p.formattedAddress || '', businessStatus: p.businessStatus, types: p.types || [], opp_id: prep.opp_id, opp_data: prep.opp_data, samVendors: prep.samVendors}}));"
+      },
+      "id": "parse-google-search",
+      "name": "📋 Parse Google",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4640,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "split-google",
+      "name": "🔄 Split Google",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        4860,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://places.googleapis.com/v1/{{ $json.place_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Goog-Api-Key",
+              "value": "={{$env.GOOGLE_PLACES_API_KEY}}"
+            },
+            {
+              "name": "X-Goog-FieldMask",
+              "value": "id,displayName,formattedAddress,formattedPhoneNumber,websiteUri,businessStatus,rating,userRatingCount,types"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "retry": {
+            "retry": {
+              "maxRetries": 3,
+              "waitBetweenTries": 3000
+            }
+          }
+        }
+      },
+      "id": "google-details",
+      "name": "📍 Place Details",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5080,
+        80
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const place = $input.item.json;\nconst original = $('🔄 Split Google').item.json;\nreturn {json: {place_id: place.id || original.place_id, name: place.displayName?.text || original.name, address: place.formattedAddress || original.address, phone: place.formattedPhoneNumber || '', website: place.websiteUri || '', businessStatus: place.businessStatus || original.businessStatus, rating: place.rating || 0, reviewCount: place.userRatingCount || 0, types: place.types || original.types, opp_id: original.opp_id, opp_data: original.opp_data}};"
+      },
+      "id": "prep-ai-screen",
+      "name": "🔧 Prep AI Screen",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5300,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "operation": "message",
+        "modelId": "={{$env.AI_MODEL || 'gpt-4o-mini'}}",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "Contractor readiness analyst. Score 0-100 based on: website quality (30%), reviews (20%), business type relevance (30%), completeness (20%). Return ONLY JSON:\n{\"readiness_score\":75,\"reasoning\":\"brief explanation\"}"
+            },
+            {
+              "role": "user",
+              "content": "Contractor: {{ $json.name }}\nAddress: {{ $json.address }}\nWebsite: {{ $json.website || 'None' }}\nPhone: {{ $json.phone || 'None' }}\nRating: {{ $json.rating }}/5 ({{ $json.reviewCount }} reviews)\nTypes: {{ $json.types.join(', ') }}\nBusiness Status: {{ $json.businessStatus }}\n\nOpportunity Type: {{ $json.opp_data.contractor_type }}\nRequired: {{ $json.opp_data.service_tags.join(', ') }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.2,
+          "maxTokens": 300
+        }
+      },
+      "id": "ai-screen",
+      "name": "🤖 AI Screen",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1.4,
+      "position": [
+        5520,
+        80
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "openai-main",
+          "name": "OpenAI"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const ai = $input.item.json.message?.content || $input.item.json.text || '';\nconst prep = $('🔧 Prep AI Screen').item.json;\nlet aiData;\ntry{const clean = ai.replace(/```json\\n?/g,'').replace(/```\\n?/g,'').trim();aiData=JSON.parse(clean);}catch(e){aiData={readiness_score:0,reasoning:'AI parsing failed'};}\nreturn {json: {source: 'GOOGLE_PLACES', place_id: prep.place_id, name: prep.name, address: prep.address, phone: prep.phone, website: prep.website, rating: prep.rating, review_count: prep.reviewCount, business_status: prep.businessStatus, types: prep.types, readiness_score: aiData.readiness_score || 0, readiness_reasoning: aiData.reasoning || 'Unknown', opp_id: prep.opp_id}};"
+      },
+      "id": "parse-ai-screen",
+      "name": "⚙️ Parse Screening",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5740,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "ready",
+              "leftValue": "={{ $json.readiness_score }}",
+              "rightValue": 60,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-ready",
+      "name": "✅ Ready?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        5960,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableId": "contractors",
+        "filterType": "manual",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "place_id",
+              "keyValue": "={{ $json.place_id }}"
+            }
+          ]
+        }
+      },
+      "id": "check-google-exists",
+      "name": "🔍 Google Exists?",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        6180,
+        0
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "supabase-main",
+          "name": "Supabase"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "new-google",
+              "leftValue": "={{ $json.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "is-new-google",
+      "name": "✅ New Google?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        6400,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "tableId": "contractors",
+        "fieldsToSend": "defineInNode",
+        "fields": {
+          "mappings": [
+            {
+              "fieldName": "source",
+              "fieldValue": "={{ $('⚙️ Parse Screening').item.json.source }}"
+            },
+            {
+              "fieldName": "place_id",
+              "fieldValue": "={{ $('⚙️ Parse Screening').item.json.place_id }}"
+            },
+            {
+              "fieldName": "name",
+              "fieldValue": "={{ $('⚙️ Parse Screening').item.json.name }}"
+            },
+            {
+              "fieldName": "address",
+              "fieldValue": "={{ $('⚙️ Parse Screening').item.json.address }}"
+            },
+            {
+              "fieldName": "phone",
+              "fieldValue": "={{ $('⚙️ Parse Screening').item.json.phone }}"
+            },
+            {
+              "fieldName": "website",
+              "fieldValue": "={{ $('⚙️ Parse Screening').item.json.website }}"
+            },
+            {
+              "fieldName": "rating",
+              "fieldValue": "={{ $('⚙️ Parse Screening').item.json.rating }}"
+            },
+            {
+              "fieldName": "review_count",
+              "fieldValue": "={{ $('⚙️ Parse Screening').item.json.review_count }}"
+            },
+            {
+              "fieldName": "sam_registered",
+              "fieldValue": false
+            },
+            {
+              "fieldName": "readiness_score",
+              "fieldValue": "={{ $('⚙️ Parse Screening').item.json.readiness_score }}"
+            },
+            {
+              "fieldName": "readiness_reasoning",
+              "fieldValue": "={{ $('⚙️ Parse Screening').item.json.readiness_reasoning }}"
+            },
+            {
+              "fieldName": "created_at",
+              "fieldValue": "={{ $now.toISO() }}"
+            }
+          ]
+        }
+      },
+      "id": "insert-google",
+      "name": "💾 Insert Google",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        6620,
+        -80
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "supabase-main",
+          "name": "Supabase"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const samVendors = $('📋 Parse SAM').item.json.vendors || [];\nreturn samVendors.length ? samVendors : [{json: {message: 'No SAM vendors to insert'}}];"
+      },
+      "id": "extract-sam",
+      "name": "📦 Extract SAM",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4200,
+        240
+      ],
+      "notes": "Insert SAM vendors (bypasses Google)"
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "split-sam",
+      "name": "🔄 Split SAM",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        4420,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableId": "contractors",
+        "filterType": "manual",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "uei",
+              "keyValue": "={{ $json.uei }}"
+            }
+          ]
+        }
+      },
+      "id": "check-sam-exists",
+      "name": "🔍 SAM Exists?",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        4640,
+        240
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "supabase-main",
+          "name": "Supabase"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "new-sam",
+              "leftValue": "={{ $json.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "is-new-sam",
+      "name": "✅ New SAM?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        4860,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "tableId": "contractors",
+        "dataToSend": "autoMapInputData"
+      },
+      "id": "insert-sam",
+      "name": "💾 Insert SAM",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        5080,
+        160
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "supabase-main",
+          "name": "Supabase"
+        }
+      },
+      "continueOnFail": true,
+      "notes": "MODULE 3: Match Engine"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{json: {trigger: 'start_matching', timestamp: new Date().toISOString()}}];"
+      },
+      "id": "merge-vendors",
+      "name": "🔗 Merge Point",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6840,
+        160
+      ],
+      "notes": "Wait for all vendor inserts to complete"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableId": "opportunities",
+        "returnAll": false,
+        "limit": 100
+      },
+      "id": "get-recent-opps",
+      "name": "📊 Get Recent Opps",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        7060,
+        160
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "supabase-main",
+          "name": "Supabase"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "split-for-match",
+      "name": "🔄 Split for Match",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        7280,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableId": "contractors",
+        "returnAll": false,
+        "limit": 100
+      },
+      "id": "get-contractors",
+      "name": "👷 Get Contractors",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        7500,
+        160
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "supabase-main",
+          "name": "Supabase"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const opp = $('🔄 Split for Match').item.json;\nconst contractors = $input.all().map(i => i.json);\nconst matches = [];\n\nfor (const c of contractors) {\n  let score = 0;\n  \n  // Location match (30 points)\n  if (c.state === opp.state) score += 20;\n  if (c.city === opp.city) score += 10;\n  \n  // NAICS match (20 points)\n  if (c.primary_naics === opp.naics) score += 20;\n  \n  // Service tag overlap (20 points)\n  const oppTags = opp.service_tags || [];\n  const contractorTags = c.primary_tag ? [c.primary_tag] : [];\n  const tagOverlap = oppTags.filter(t => contractorTags.includes(t)).length;\n  score += Math.min(20, tagOverlap * 10);\n  \n  // Readiness score (30 points)\n  score += Math.round((c.readiness_score || 0) * 0.3);\n  \n  // SAM bonus (+10)\n  if (c.sam_registered) score += 10;\n  \n  // Complexity alignment (bonus/penalty)\n  if (opp.complexity_score <= 2 && c.readiness_score >= 80) score += 5;\n  if (opp.complexity_score >= 4 && c.readiness_score < 70) score -= 5;\n  \n  const finalScore = Math.min(100, Math.max(0, score));\n  \n  if (finalScore >= 75) {\n    matches.push({\n      json: {\n        opportunity_id: opp.notice_id,\n        contractor_id: c.id,\n        match_score: finalScore,\n        location_score: c.state === opp.state ? 20 : 0,\n        naics_match: c.primary_naics === opp.naics,\n        readiness_score: c.readiness_score,\n        is_sam_vendor: c.sam_registered || false,\n        matched_at: new Date().toISOString(),\n        match_metadata: {\n          opp_priority: opp.priority_flag,\n          opp_value: opp.estimated_value,\n          contractor_source: c.source\n        }\n      }\n    });\n  }\n}\n\nreturn matches.length ? matches : [{json: {message: 'No matches above threshold'}}];"
+      },
+      "id": "calculate-match",
+      "name": "🎯 Calculate Match",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7720,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "valid-match",
+              "leftValue": "={{ $json.match_score }}",
+              "rightValue": 1,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-valid-match",
+      "name": "✅ Valid Match?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        7940,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "tableId": "matches",
+        "dataToSend": "autoMapInputData"
+      },
+      "id": "insert-match",
+      "name": "💾 Insert Match",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        8160,
+        80
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "supabase-main",
+          "name": "Supabase"
+        }
+      },
+      "continueOnFail": true,
+      "notes": "MODULE 4: CRM Sync"
+    },
+    {
+      "parameters": {
+        "jsCode": "const match = $input.item.json;\nconst oppId = match.opportunity_id;\nconst contractorId = match.contractor_id;\n\n// Get full opportunity and contractor details\nreturn {json: {match_id: match.id, match_score: match.match_score, opp_id: oppId, contractor_id: contractorId, metadata: match.match_metadata}};"
+      },
+      "id": "prep-crm",
+      "name": "🔧 Prep CRM",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        8380,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/deals",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer {{$env.HUBSPOT_API_KEY}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "properties.dealname",
+              "value": "={{ $json.opp_id }} - Match Score {{ $json.match_score }}"
+            },
+            {
+              "name": "properties.amount",
+              "value": "={{ $json.metadata.opp_value || 0 }}"
+            },
+            {
+              "name": "properties.dealstage",
+              "value": "qualifiedtobuy"
+            },
+            {
+              "name": "properties.pipeline",
+              "value": "default"
+            },
+            {
+              "name": "properties.closedate",
+              "value": "={{ $now.plus({days: 30}).toISO() }}"
+            },
+            {
+              "name": "properties.match_score",
+              "value": "={{ $json.match_score }}"
+            },
+            {
+              "name": "properties.opportunity_id",
+              "value": "={{ $json.opp_id }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "retry": {
+            "retry": {
+              "maxRetries": 2,
+              "waitBetweenTries": 3000
+            }
+          }
+        }
+      },
+      "id": "create-hubspot",
+      "name": "📋 HubSpot Deal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        8600,
+        80
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.SLACK_WEBHOOK_URL}}",
+        "sendBody": true,
+        "contentType": "json",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "text",
+              "value": "🎯 New High-Quality Match!"
+            },
+            {
+              "name": "blocks",
+              "value": "=[{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"*Match Score:* {{ $('🔧 Prep CRM').item.json.match_score }}/100\\n*Opportunity:* {{ $('🔧 Prep CRM').item.json.opp_id }}\\n*Value:* ${{ $('🔧 Prep CRM').item.json.metadata.opp_value }}\\n*Source:* {{ $('🔧 Prep CRM').item.json.metadata.contractor_source }}\"}}]"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "slack-notify",
+      "name": "💬 Slack Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        8820,
+        80
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {},
+      "id": "noop-filtered",
+      "name": "⏸️ Filtered",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2000,
+        400
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "noop-dup",
+      "name": "⏸️ Duplicate",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2440,
+        320
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "noop-not-ready",
+      "name": "⏸️ Not Ready",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        6180,
+        160
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "noop-google-exists",
+      "name": "⏸️ Google Exists",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        6620,
+        80
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "noop-sam-exists",
+      "name": "⏸️ SAM Exists",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        5080,
+        320
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "noop-no-match",
+      "name": "⏸️ No Match",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        8160,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "select",
+        "table": "search_profiles",
+        "select": "id,name,naics_codes,min_budget,max_budget",
+        "where": {
+          "conditions": []
+        },
+        "limit": {
+          "enabled": false
+        }
+      },
+      "id": "get-active-profiles",
+      "name": "🔍 Get Active Profiles",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        460,
+        500
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "supabase-main",
+          "name": "Supabase"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "⏰ Every 6 Hours": {
+      "main": [
+        [
+          {
+            "node": "🔄 Init Pagination",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔄 Init Pagination": {
+      "main": [
+        [
+          {
+            "node": "🔍 Get Active Profiles",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📡 SAM.gov API": {
+      "main": [
+        [
+          {
+            "node": "🔍 Check Pagination",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔍 Check Pagination": {
+      "main": [
+        [
+          {
+            "node": "📄 More Pages?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📄 More Pages?": {
+      "main": [
+        [
+          {
+            "node": "📡 SAM.gov API",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "📦 Extract All Opps",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📦 Extract All Opps": {
+      "main": [
+        [
+          {
+            "node": "🔄 Split Opps",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔄 Split Opps": {
+      "main": [
+        [
+          {
+            "node": "🎯 Hard Filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🎯 Hard Filter": {
+      "main": [
+        [
+          {
+            "node": "🔍 Check Dup",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "⏸️ Filtered",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔍 Check Dup": {
+      "main": [
+        [
+          {
+            "node": "✅ New?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "✅ New?": {
+      "main": [
+        [
+          {
+            "node": "🔧 Prep AI",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "⏸️ Duplicate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔧 Prep AI": {
+      "main": [
+        [
+          {
+            "node": "🤖 AI Enrich",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🤖 AI Enrich": {
+      "main": [
+        [
+          {
+            "node": "⚙️ Parse AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "⚙️ Parse AI": {
+      "main": [
+        [
+          {
+            "node": "💾 Insert Opp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "💾 Insert Opp": {
+      "main": [
+        [
+          {
+            "node": "🔧 Prep Vendor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "finish": [
+        [
+          {
+            "node": "🔄 Split Opps",
+            "type": "finish",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔧 Prep Vendor": {
+      "main": [
+        [
+          {
+            "node": "🏛️ SAM Vendors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🏛️ SAM Vendors": {
+      "main": [
+        [
+          {
+            "node": "📋 Parse SAM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📋 Parse SAM": {
+      "main": [
+        [
+          {
+            "node": "🔍 Need Google?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔍 Need Google?": {
+      "main": [
+        [
+          {
+            "node": "🔧 Prep Google",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "📦 Extract SAM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔧 Prep Google": {
+      "main": [
+        [
+          {
+            "node": "🌐 Google Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🌐 Google Search": {
+      "main": [
+        [
+          {
+            "node": "📋 Parse Google",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📋 Parse Google": {
+      "main": [
+        [
+          {
+            "node": "🔄 Split Google",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔄 Split Google": {
+      "main": [
+        [
+          {
+            "node": "📍 Place Details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📍 Place Details": {
+      "main": [
+        [
+          {
+            "node": "🔧 Prep AI Screen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔧 Prep AI Screen": {
+      "main": [
+        [
+          {
+            "node": "🤖 AI Screen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🤖 AI Screen": {
+      "main": [
+        [
+          {
+            "node": "⚙️ Parse Screening",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "⚙️ Parse Screening": {
+      "main": [
+        [
+          {
+            "node": "✅ Ready?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "✅ Ready?": {
+      "main": [
+        [
+          {
+            "node": "🔍 Google Exists?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "⏸️ Not Ready",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔍 Google Exists?": {
+      "main": [
+        [
+          {
+            "node": "✅ New Google?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "✅ New Google?": {
+      "main": [
+        [
+          {
+            "node": "💾 Insert Google",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "⏸️ Google Exists",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "💾 Insert Google": {
+      "main": [
+        [
+          {
+            "node": "🔄 Split Google",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "🔗 Merge Point",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📦 Extract SAM": {
+      "main": [
+        [
+          {
+            "node": "🔄 Split SAM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔄 Split SAM": {
+      "main": [
+        [
+          {
+            "node": "🔍 SAM Exists?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔍 SAM Exists?": {
+      "main": [
+        [
+          {
+            "node": "✅ New SAM?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "✅ New SAM?": {
+      "main": [
+        [
+          {
+            "node": "💾 Insert SAM",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "⏸️ SAM Exists",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "💾 Insert SAM": {
+      "main": [
+        [
+          {
+            "node": "🔄 Split SAM",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "🔗 Merge Point",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔗 Merge Point": {
+      "main": [
+        [
+          {
+            "node": "📊 Get Recent Opps",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📊 Get Recent Opps": {
+      "main": [
+        [
+          {
+            "node": "🔄 Split for Match",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔄 Split for Match": {
+      "main": [
+        [
+          {
+            "node": "👷 Get Contractors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "👷 Get Contractors": {
+      "main": [
+        [
+          {
+            "node": "🎯 Calculate Match",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🎯 Calculate Match": {
+      "main": [
+        [
+          {
+            "node": "✅ Valid Match?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "✅ Valid Match?": {
+      "main": [
+        [
+          {
+            "node": "💾 Insert Match",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "⏸️ No Match",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "💾 Insert Match": {
+      "main": [
+        [
+          {
+            "node": "🔧 Prep CRM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔧 Prep CRM": {
+      "main": [
+        [
+          {
+            "node": "📋 HubSpot Deal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📋 HubSpot Deal": {
+      "main": [
+        [
+          {
+            "node": "💬 Slack Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "💬 Slack Alert": {
+      "main": [
+        [
+          {
+            "node": "🔄 Split for Match",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔍 Get Active Profiles": {
+      "main": [
+        [
+          {
+            "node": "📡 SAM.gov API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2026-02-14T00:00:00.000Z",
+  "versionId": "1.0.0",
+  "active": false
+}

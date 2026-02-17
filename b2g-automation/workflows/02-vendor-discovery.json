@@ -1,0 +1,627 @@
+{
+  "name": "02 – Vendor Discovery (SAM + Google Places + AI Screening)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "vendor-discovery",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "🌐 Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [20, 300],
+      "webhookId": "vendor-discovery"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse incoming webhook data from frontend\nconst input = $input.item.json;\nconst opportunity = input.body?.opportunity || input.opportunity || input;\n\nreturn {\n  json: {\n    opportunity_id: opportunity.notice_id || opportunity.id,\n    primary_service_tag: (opportunity.service_tags && opportunity.service_tags[0]) || opportunity.contractor_type || 'General',\n    state: opportunity.state,\n    city: opportunity.city || '',\n    naics: opportunity.naics,\n    opportunity_data: opportunity\n  }\n};"
+      },
+      "id": "webhook-opportunity-trigger",
+      "name": "📨 Parse Opportunity",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "notes": "Parses the incoming webhook data from the frontend"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.sam.gov/entity-information/v3/entities",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "api_key",
+              "value": "={{$env.SAM_API_KEY}}"
+            },
+            {
+              "name": "primaryNaics",
+              "value": "={{ $json.naics }}"
+            },
+            {
+              "name": "physicalAddressStateOrProvinceCode",
+              "value": "={{ $json.state }}"
+            },
+            {
+              "name": "registrationStatus",
+              "value": "A"
+            },
+            {
+              "name": "includeSections",
+              "value": "entityRegistration,coreData"
+            },
+            {
+              "name": "page",
+              "value": "0"
+            },
+            {
+              "name": "size",
+              "value": "25"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "retry": {
+            "retry": {
+              "maxRetries": 3,
+              "retryOnHttpStatusCode": "429,500,502,503,504",
+              "waitBetweenTries": 5000
+            }
+          }
+        }
+      },
+      "id": "http-sam-vendor-search",
+      "name": "🏛️ SAM Vendor Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 300],
+      "continueOnFail": true,
+      "notes": "PRIMARY: Search SAM.gov for registered vendors by NAICS + State"
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.item.json;\nconst trigger = $('Opportunity Webhook').item.json;\n\nconst entities = response.entityData || [];\n\nif (!entities.length) {\n  return [{\n    json: {\n      message: 'No SAM vendors found',\n      vendor_count: 0,\n      opportunity_id: trigger.opportunity_id,\n      continue_to_google: true\n    }\n  }];\n}\n\nconst contractors = entities.map(entity => {\n  const registration = entity.entityRegistration || {};\n  const coreData = entity.coreData || {};\n  const physicalAddress = coreData.physicalAddress || {};\n  \n  return {\n    source: 'SAM_VENDOR',\n    opportunity_id: trigger.opportunity_id,\n    uei: coreData.ueiSAM || registration.ueiSAM,\n    cage_code: coreData.cageCode,\n    name: registration.legalBusinessName || coreData.entityInformation?.entityName,\n    dba_name: registration.dbaName,\n    address: `${physicalAddress.addressLine1 || ''} ${physicalAddress.addressLine2 || ''}`.trim(),\n    city: physicalAddress.city,\n    state: physicalAddress.stateOrProvinceCode,\n    zip: physicalAddress.zipCode,\n    country: physicalAddress.countryCode,\n    primary_naics: registration.primaryNaics,\n    registration_date: registration.registrationDate,\n    expiration_date: registration.expirationDate,\n    sam_registered: true,\n    business_types: registration.businessTypes || [],\n    primary_tag: trigger.primary_service_tag\n  };\n});\n\nreturn contractors.map(c => ({ json: c }));"
+      },
+      "id": "code-parse-sam-vendors",
+      "name": "📋 Parse SAM Vendors",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "split-sam-vendors",
+      "name": "🔄 Split SAM Vendors",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableId": "contractors",
+        "filterType": "manual",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "uei",
+              "keyValue": "={{ $json.uei }}"
+            }
+          ]
+        }
+      },
+      "id": "supabase-check-vendor-exists",
+      "name": "🔍 Check Vendor Exists",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1120, 300],
+      "credentials": {
+        "supabaseApi": {
+          "id": "supabase-main",
+          "name": "Supabase"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "vendor-new",
+              "leftValue": "={{ $json.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-vendor-new",
+      "name": "✅ Is New Vendor?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "tableId": "contractors",
+        "fieldsToSend": "defineInNode",
+        "fields": {
+          "mappings": [
+            {
+              "fieldName": "source",
+              "fieldValue": "={{ $('Split SAM Vendors').item.json.source }}"
+            },
+            {
+              "fieldName": "uei",
+              "fieldValue": "={{ $('Split SAM Vendors').item.json.uei }}"
+            },
+            {
+              "fieldName": "cage_code",
+              "fieldValue": "={{ $('Split SAM Vendors').item.json.cage_code }}"
+            },
+            {
+              "fieldName": "name",
+              "fieldValue": "={{ $('Split SAM Vendors').item.json.name }}"
+            },
+            {
+              "fieldName": "dba_name",
+              "fieldValue": "={{ $('Split SAM Vendors').item.json.dba_name }}"
+            },
+            {
+              "fieldName": "address",
+              "fieldValue": "={{ $('Split SAM Vendors').item.json.address }}"
+            },
+            {
+              "fieldName": "city",
+              "fieldValue": "={{ $('Split SAM Vendors').item.json.city }}"
+            },
+            {
+              "fieldName": "state",
+              "fieldValue": "={{ $('Split SAM Vendors').item.json.state }}"
+            },
+            {
+              "fieldName": "zip",
+              "fieldValue": "={{ $('Split SAM Vendors').item.json.zip }}"
+            },
+            {
+              "fieldName": "primary_naics",
+              "fieldValue": "={{ $('Split SAM Vendors').item.json.primary_naics }}"
+            },
+            {
+              "fieldName": "sam_registered",
+              "fieldValue": true
+            },
+            {
+              "fieldName": "readiness_score",
+              "fieldValue": 100
+            },
+            {
+              "fieldName": "readiness_reasoning",
+              "fieldValue": "SAM.gov registered vendor - automatically qualified"
+            },
+            {
+              "fieldName": "primary_tag",
+              "fieldValue": "={{ $('Split SAM Vendors').item.json.primary_tag }}"
+            },
+            {
+              "fieldName": "created_at",
+              "fieldValue": "={{ $now.toISO() }}"
+            }
+          ]
+        }
+      },
+      "id": "supabase-insert-sam-vendor",
+      "name": "💾 Insert SAM Vendor",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1560, 220],
+      "credentials": {
+        "supabaseApi": {
+          "id": "supabase-main",
+          "name": "Supabase"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const allVendors = $('Split SAM Vendors').all();\nconst samVendorCount = allVendors.length;\nconst trigger = $('Opportunity Webhook').item.json;\n\nreturn {\n  json: {\n    opportunity_id: trigger.opportunity_id,\n    sam_vendor_count: samVendorCount,\n    continue_to_google: samVendorCount < 5,\n    primary_service_tag: trigger.primary_service_tag,\n    state: trigger.state,\n    city: trigger.city\n  }\n};"
+      },
+      "id": "code-check-sam-count",
+      "name": "🔢 Check SAM Vendor Count",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1780, 220]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "need-more-vendors",
+              "leftValue": "={{ $json.continue_to_google }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-need-google-search",
+      "name": "🔎 Need More Vendors?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2000, 220]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://maps.googleapis.com/maps/api/place/textsearch/json",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "query",
+              "value": "={{ $json.primary_service_tag }} contractor {{ $json.city ? $json.city + ' ' : '' }}{{ $json.state }}"
+            },
+            {
+              "name": "key",
+              "value": "={{$env.GOOGLE_PLACES_API_KEY}}"
+            },
+            {
+              "name": "type",
+              "value": "establishment"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000,
+          "retry": {
+            "retry": {
+              "maxRetries": 3,
+              "retryOnHttpStatusCode": "429,500,502,503,504",
+              "waitBetweenTries": 3000
+            }
+          }
+        }
+      },
+      "id": "http-google-places",
+      "name": "📍 Google Places Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2220, 140],
+      "continueOnFail": true,
+      "notes": "SECONDARY: Search Google Places if SAM vendors <5"
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.item.json;\nconst trigger = $('Check SAM Vendor Count').item.json;\n\nconst results = response.results || [];\n\nif (!results.length) {\n  return [{ json: { message: 'No Google Places results', count: 0 } }];\n}\n\nconst contractors = results.slice(0, 10).map(place => ({\n  source: 'GOOGLE_PLACES',\n  opportunity_id: trigger.opportunity_id,\n  place_id: place.place_id,\n  name: place.name,\n  address: place.formatted_address,\n  rating: place.rating || 0,\n  total_ratings: place.user_ratings_total || 0,\n  types: place.types || [],\n  lat: place.geometry?.location?.lat,\n  lng: place.geometry?.location?.lng,\n  state: trigger.state,\n  sam_registered: false,\n  primary_tag: trigger.primary_service_tag,\n  needs_ai_screening: true\n}));\n\nreturn contractors.map(c => ({ json: c }));"
+      },
+      "id": "code-parse-google-results",
+      "name": "📋 Parse Google Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2440, 140]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "split-google-contractors",
+      "name": "🔄 Split Google Contractors",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [2660, 140]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://maps.googleapis.com/maps/api/place/details/json",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "place_id",
+              "value": "={{ $json.place_id }}"
+            },
+            {
+              "name": "fields",
+              "value": "name,website,formatted_phone_number,opening_hours,business_status"
+            },
+            {
+              "name": "key",
+              "value": "={{$env.GOOGLE_PLACES_API_KEY}}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000,
+          "retry": {
+            "retry": {
+              "maxRetries": 2,
+              "waitBetweenTries": 2000
+            }
+          }
+        }
+      },
+      "id": "http-place-details",
+      "name": "📄 Get Place Details",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2880, 140],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const details = $input.item.json.result || {};\nconst contractor = $('Split Google Contractors').item.json;\n\nconst enriched = {\n  ...contractor,\n  website: details.website || null,\n  phone: details.formatted_phone_number || null,\n  business_status: details.business_status || 'UNKNOWN'\n};\n\nreturn { json: enriched };"
+      },
+      "id": "code-merge-details",
+      "name": "🔗 Merge Details",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3100, 140]
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "operation": "message",
+        "modelId": "={{$env.AI_MODEL || 'gpt-4o-mini'}}",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a government contracting readiness assessor. Score contractors 0-100.\n\nReturn ONLY JSON:\n{\n  \"readiness_score\": 75,\n  \"reasoning\": \"Brief explanation\",\n  \"certifications_found\": [],\n  \"red_flags\": []\n}"
+            },
+            {
+              "role": "user",
+              "content": "=Name: {{ $json.name }}\nRating: {{ $json.rating }}/5 ({{ $json.total_ratings }} reviews)\nAddress: {{ $json.address }}\nWebsite: {{ $json.website || 'None' }}\nPhone: {{ $json.phone || 'None' }}\nStatus: {{ $json.business_status }}\nTypes: {{ JSON.stringify($json.types) }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.2,
+          "maxTokens": 200
+        }
+      },
+      "id": "openai-screen-contractor",
+      "name": "🤖 AI Screen Contractor",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1.4,
+      "position": [3320, 140],
+      "credentials": {
+        "openAiApi": {
+          "id": "openai-main",
+          "name": "OpenAI"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const aiResponse = $input.item.json.message?.content || $input.item.json.text || '';\nconst contractor = $('Merge Details').item.json;\n\nlet aiData;\ntry {\n  const cleanResponse = aiResponse.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n  aiData = JSON.parse(cleanResponse);\n} catch (error) {\n  aiData = {\n    readiness_score: 50,\n    reasoning: 'AI parsing failed',\n    certifications_found: [],\n    red_flags: ['AI_PARSE_ERROR']\n  };\n}\n\nconst record = {\n  source: contractor.source,\n  place_id: contractor.place_id,\n  name: contractor.name,\n  website: contractor.website,\n  address: contractor.address,\n  phone: contractor.phone,\n  rating: contractor.rating,\n  total_ratings: contractor.total_ratings,\n  state: contractor.state,\n  sam_registered: false,\n  readiness_score: aiData.readiness_score || 50,\n  readiness_reasoning: aiData.reasoning || '',\n  certifications: aiData.certifications_found || [],\n  red_flags: aiData.red_flags || [],\n  primary_tag: contractor.primary_tag,\n  created_at: new Date().toISOString()\n};\n\nreturn { json: record };"
+      },
+      "id": "code-parse-ai-screening",
+      "name": "⚙️ Parse AI Screening",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3540, 140]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "readiness-threshold",
+              "leftValue": "={{ $json.readiness_score }}",
+              "rightValue": 60,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-readiness-pass",
+      "name": "✅ Readiness ≥ 60?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [3760, 140]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "tableId": "contractors",
+        "dataToSend": "autoMapInputData"
+      },
+      "id": "supabase-insert-google-contractor",
+      "name": "💾 Insert Google Contractor",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [3980, 60],
+      "credentials": {
+        "supabaseApi": {
+          "id": "supabase-main",
+          "name": "Supabase"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "tableId": "workflow_errors",
+        "fieldsToSend": "defineInNode",
+        "fields": {
+          "mappings": [
+            {
+              "fieldName": "workflow_name",
+              "fieldValue": "Vendor Discovery"
+            },
+            {
+              "fieldName": "node_name",
+              "fieldValue": "={{ $node.name }}"
+            },
+            {
+              "fieldName": "error_message",
+              "fieldValue": "={{ $json.error || $json.message || 'Unknown error' }}"
+            },
+            {
+              "fieldName": "timestamp",
+              "fieldValue": "={{ $now.toISO() }}"
+            },
+            {
+              "fieldName": "context",
+              "fieldValue": "={{ $json }}"
+            }
+          ]
+        }
+      },
+      "id": "supabase-error-handler",
+      "name": "🔴 Log Error",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1340, 520],
+      "credentials": {
+        "supabaseApi": {
+          "id": "supabase-main",
+          "name": "Supabase"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "noop-vendor-exists",
+      "name": "⏸️ Stop - Vendor Exists",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1560, 380]
+    },
+    {
+      "parameters": {},
+      "id": "noop-low-readiness",
+      "name": "⏸️ Stop - Low Readiness",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [3980, 220]
+    },
+    {
+      "parameters": {},
+      "id": "noop-enough-sam",
+      "name": "✅ Enough SAM Vendors",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [2220, 300]
+    }
+  ],
+  "connections": {
+    "🌐 Webhook Trigger": {
+      "main": [[{"node": "📨 Parse Opportunity", "type": "main", "index": 0}]]
+    },
+    "📨 Parse Opportunity": {
+      "main": [[{"node": "🏛️ SAM Vendor Search", "type": "main", "index": 0}]]
+    },
+    "🏛️ SAM Vendor Search": {
+      "main": [
+        [{"node": "📋 Parse SAM Vendors", "type": "main", "index": 0}],
+        [{"node": "🔴 Log Error", "type": "main", "index": 0}]
+      ]
+    },
+    "📋 Parse SAM Vendors": {
+      "main": [[{"node": "🔄 Split SAM Vendors", "type": "main", "index": 0}]]
+    },
+    "🔄 Split SAM Vendors": {
+      "main": [[{"node": "🔍 Check Vendor Exists", "type": "main", "index": 0}]]
+    },
+    "🔍 Check Vendor Exists": {
+      "main": [[{"node": "✅ Is New Vendor?", "type": "main", "index": 0}]]
+    },
+    "✅ Is New Vendor?": {
+      "main": [
+        [{"node": "💾 Insert SAM Vendor", "type": "main", "index": 0}],
+        [{"node": "⏸️ Stop - Vendor Exists", "type": "main", "index": 0}]
+      ]
+    },
+    "💾 Insert SAM Vendor": {
+      "main": [[{"node": "🔄 Split SAM Vendors", "type": "main", "index": 0}]]
+    },
+    "🔢 Check SAM Vendor Count": {
+      "main": [[{"node": "🔎 Need More Vendors?", "type": "main", "index": 0}]]
+    },
+    "🔎 Need More Vendors?": {
+      "main": [
+        [{"node": "📍 Google Places Search", "type": "main", "index": 0}],
+        [{"node": "✅ Enough SAM Vendors", "type": "main", "index": 0}]
+      ]
+    },
+    "📍 Google Places Search": {
+      "main": [[{"node": "📋 Parse Google Results", "type": "main", "index": 0}]]
+    },
+    "📋 Parse Google Results": {
+      "main": [[{"node": "🔄 Split Google Contractors", "type": "main", "index": 0}]]
+    },
+    "🔄 Split Google Contractors": {
+      "main": [[{"node": "📄 Get Place Details", "type": "main", "index": 0}]]
+    },
+    "📄 Get Place Details": {
+      "main": [[{"node": "🔗 Merge Details", "type": "main", "index": 0}]]
+    },
+    "🔗 Merge Details": {
+      "main": [[{"node": "🤖 AI Screen Contractor", "type": "main", "index": 0}]]
+    },
+    "🤖 AI Screen Contractor": {
+      "main": [[{"node": "⚙️ Parse AI Screening", "type": "main", "index": 0}]]
+    },
+    "⚙️ Parse AI Screening": {
+      "main": [[{"node": "✅ Readiness ≥ 60?", "type": "main", "index": 0}]]
+    },
+    "✅ Readiness ≥ 60?": {
+      "main": [
+        [{"node": "💾 Insert Google Contractor", "type": "main", "index": 0}],
+        [{"node": "⏸️ Stop - Low Readiness", "type": "main", "index": 0}]
+      ]
+    },
+    "💾 Insert Google Contractor": {
+      "main": [[{"node": "🔄 Split Google Contractors", "type": "main", "index": 0}]]
+    }
+  },
+  "pinData": {},
+  "settings": {"executionOrder": "v1"},
+  "staticData": null,
+  "tags": [{"id": "vendor-discovery", "name": "Vendor Discovery"}],
+  "triggerCount": 0,
+  "updatedAt": "2026-02-13T00:00:00.000Z",
+  "versionId": "1.0.0"
+}

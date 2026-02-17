@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "askUser": false,
+    "executeWithoutPrompts": true,
+    "allowDestructiveOperations": true,
+    "autoDeleteCache": true,
+    "allowFileModifications": true
+  },
+  "assistantBehavior": {
+    "autonomyLevel": "full",
+    "reportProgressFrequency": "after_major_changes",
+    "confirmOnlyFor": ["deployToProduction", "deleteDatabase"]
+  }
+}
